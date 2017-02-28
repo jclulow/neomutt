@@ -79,25 +79,30 @@ void mutt_to_base64 (unsigned char *out, const unsigned char *in, size_t len,
   *out = '\0';
 }
 
+#define	BASE64URL_FIXUP(c, urlsafe)		((!urlsafe) ? (c) : \
+						(c) == '-' ? '+' : \
+						(c) == '_' ? '/' : \
+						(c))
+
 /* Convert '\0'-terminated base 64 string to raw bytes.
  * Returns length of returned buffer, or -1 on error */
-int mutt_from_base64 (char *out, const char *in)
+int mutt_from_base64_common (char *out, const char *in, int urlsafe)
 {
   int len = 0;
   register unsigned char digit1, digit2, digit3, digit4;
 
   do
   {
-    digit1 = in[0];
+    digit1 = BASE64URL_FIXUP(in[0], urlsafe);
     if (digit1 > 127 || base64val (digit1) == BAD)
       return -1;
-    digit2 = in[1];
+    digit2 = BASE64URL_FIXUP(in[1], urlsafe);
     if (digit2 > 127 || base64val (digit2) == BAD)
       return -1;
-    digit3 = in[2];
+    digit3 = BASE64URL_FIXUP(in[2], urlsafe);
     if (digit3 > 127 || ((digit3 != '=') && (base64val (digit3) == BAD)))
       return -1;
-    digit4 = in[3];
+    digit4 = BASE64URL_FIXUP(in[3], urlsafe);
     if (digit4 > 127 || ((digit4 != '=') && (base64val (digit4) == BAD)))
       return -1;
     in += 4;
@@ -119,4 +124,14 @@ int mutt_from_base64 (char *out, const char *in)
   while (*in && digit4 != '=');
 
   return len;
+}
+
+int mutt_from_base64 (char *out, const char *in)
+{
+  return mutt_from_base64_common (out, in, 0);
+}
+
+int mutt_from_base64url (char *out, const char *in)
+{
+  return mutt_from_base64_common (out, in, 1);
 }

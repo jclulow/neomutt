@@ -43,6 +43,10 @@
 #include "imap/imap.h"
 #endif
 
+#ifdef USE_MSQLITE
+#include "msqlite.h"
+#endif
+
 #ifdef USE_HCACHE
 #include "hcache.h"
 #endif
@@ -874,6 +878,9 @@ int main (int argc, char **argv, char **environ)
 #ifdef USE_IMAP
     /* we're not connected yet - skip mail folder creation */
     if (!mx_is_imap (fpath))
+#endif
+#ifdef USE_MSQLITE
+    if (!mx_is_msqlite (fpath))
 #endif
     if (stat (fpath, &sb) == -1 && errno == ENOENT)
     {

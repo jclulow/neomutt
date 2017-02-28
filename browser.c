@@ -32,6 +32,9 @@
 #ifdef USE_IMAP
 #include "imap.h"
 #endif
+#ifdef USE_MSQLITE
+#include "msqlite.h"
+#endif
 
 #include <stdlib.h>
 #include <dirent.h>
@@ -192,6 +195,11 @@ folder_format_str (char *dest, size_t destlen, size_t col, int cols, char op, co
     case 'f':
     {
       char *s;
+#ifdef USE_MSQLITE
+      if (folder->ff->desc != NULL)
+        s = folder->ff->desc;
+      else
+#endif
 #ifdef USE_IMAP
       if (folder->ff->imap)
 	s = NONULL (folder->ff->desc);
@@ -492,6 +500,13 @@ static int examine_mailboxes (MUTTMENU *menu, struct browser_state *state)
       tmp->msg_unread = Context->unread;
     }
 
+#ifdef USE_MSQLITE
+    if (mx_is_msqlite (tmp->path))
+    {
+      add_folder (menu, state, tmp->path, NULL, tmp);
+      continue;
+    }
+#endif
 #ifdef USE_IMAP
     if (mx_is_imap (tmp->path))
     {
@@ -628,6 +643,16 @@ void _mutt_select_file (char *f, size_t flen, int flags, char ***files, int *num
   if (*f)
   {
     mutt_expand_path (f, flen);
+#ifdef USE_MSQLITE
+    if (mx_is_msqlite (f))
+    {
+      init_state (&state, NULL);
+      msqlite_browse (f, &state);
+      browser_sort (&state);
+    }
+    else
+    {
+#endif
 #ifdef USE_IMAP
     if (mx_is_imap (f))
     {
@@ -671,6 +696,9 @@ void _mutt_select_file (char *f, size_t flen, int flags, char ***files, int *num
 #ifdef USE_IMAP
     }
 #endif
+#ifdef USE_MSQLITE
+    }
+#endif
   }
   else 
   {
@@ -678,7 +706,15 @@ void _mutt_select_file (char *f, size_t flen, int flags, char ***files, int *num
       getcwd (LastDir, sizeof (LastDir));
     else if (!LastDir[0])
       strfcpy (LastDir, NONULL(Maildir), sizeof (LastDir));
-    
+
+#ifdef USE_MSQLITE
+    if (mx_is_msqlite (LastDir)) {
+      init_state (&state, NULL);
+      msqlite_browse (LastDir, &state);
+      browser_sort (&state);
+    }
+    else
+#endif
 #ifdef USE_IMAP
     if (!buffy && mx_is_imap (LastDir))
     {
@@ -708,6 +744,9 @@ void _mutt_select_file (char *f, size_t flen, int flags, char ***files, int *num
   else
 #ifdef USE_IMAP
   if (!state.imap_browse)
+#endif
+#ifdef USE_MSQLITE
+  if (!mx_is_msqlite (LastDir))
 #endif
   if (examine_directory (NULL, &state, LastDir, prefix) == -1)
     goto bail;

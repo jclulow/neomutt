@@ -41,6 +41,10 @@
 #include "imap.h"
 #endif
 
+#ifdef USE_MSQLITE
+#include "msqlite.h"
+#endif
+
 #ifdef USE_POP
 #include "pop.h"
 #endif
@@ -71,6 +75,10 @@ struct mx_ops* mx_get_ops (int magic)
 #ifdef USE_IMAP
     case MUTT_IMAP:
       return &mx_imap_ops;
+#endif
+#ifdef USE_MSQLITE
+    case MUTT_MSQLITE:
+      return &mx_msqlite_ops;
 #endif
     case MUTT_MAILDIR:
       return &mx_maildir_ops;
@@ -384,6 +392,11 @@ int mx_get_magic (const char *path)
   int magic = 0;
   char tmp[_POSIX_PATH_MAX];
   FILE *f;
+
+#ifdef USE_MSQLITE
+  if (mx_is_msqlite (path))
+    return MUTT_MSQLITE;
+#endif /* USE_MSQLITE */
 
 #ifdef USE_IMAP
   if(mx_is_imap(path))
@@ -1283,6 +1296,12 @@ int mx_check_mailbox (CONTEXT *ctx, int *index_hint)
   if (!ctx || !ctx->mx_ops)
   {
     dprint (1, (debugfile, "mx_check_mailbox: null or invalid context.\n"));
+    return -1;
+  }
+
+  if (!ctx->mx_ops->check)
+  {
+    dprint (1, (debugfile, "mx_check_mailbox(): function not implemented for mailbox type %d.\n", ctx->magic));
     return -1;
   }
 
