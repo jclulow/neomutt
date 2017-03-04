@@ -1083,6 +1083,21 @@ int mutt_index_menu (void)
 	 * The following operations can be performed inside of the pager.
 	 */
 
+#ifdef USE_MSQLITE
+	case OP_MAIN_MSQLITE_ENTIRE_THREAD: {
+		CHECK_MSGCOUNT;
+		CHECK_VISIBLE;
+
+		if (Context->magic != MUTT_MSQLITE) {
+			mutt_error("this is not an msqlite directory");
+			break;
+		}
+
+		msqlite_entire_thread(Context, CURHDR);
+		break;
+	}
+#endif
+
 #ifdef USE_IMAP
       case OP_MAIN_IMAP_FETCH:
 	if (Context && Context->magic == MUTT_IMAP)

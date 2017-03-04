@@ -29,6 +29,8 @@ extern int msqlite_check_empty (const char *path);
 
 extern int msqlite_browse(const char *f, struct browser_state *state);
 
+extern int msqlite_entire_thread(CONTEXT *, HEADER *);
+
 /*
  * XXX NOTES
  *

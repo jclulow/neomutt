@@ -111,6 +111,9 @@ const struct binding_t OpMain[] = { /* map: index */
   { "imap-fetch-mail",		OP_MAIN_IMAP_FETCH,		NULL },
   { "imap-logout-all",		OP_MAIN_IMAP_LOGOUT_ALL,	NULL },
 #endif
+#ifdef USE_MSQLITE
+  { "entire-thread",		OP_MAIN_MSQLITE_ENTIRE_THREAD,	NULL },
+#endif
   { "display-toggle-weed",		OP_DISPLAY_HEADERS,		"h" },
   { "next-undeleted",		OP_MAIN_NEXT_UNDELETED,		"j" },
   { "previous-undeleted",	OP_MAIN_PREV_UNDELETED,		"k" },
