@@ -812,6 +812,11 @@ typedef struct header
 
 #if defined USE_POP || defined USE_IMAP || defined USE_MSQLITE
   void *data;            	/* driver-specific data */
+
+  /*
+   * If provided, called to free the driver-specific data on this HEADER.
+   */
+  void (*data_free) (struct header *);
 #endif
   
   char *maildir_flags;		/* unknown maildir flags */

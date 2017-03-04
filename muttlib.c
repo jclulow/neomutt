@@ -355,7 +355,11 @@ void mutt_free_header (HEADER **h)
   mutt_free_list (&(*h)->chain);
 #endif
 #if defined USE_POP || defined USE_IMAP
-  FREE (&(*h)->data);
+  if ((*h)->data_free != NULL && (*h)->data != NULL) {
+    (*h)->data_free(*h);
+  } else {
+    FREE (&(*h)->data);
+  }
 #endif
   FREE (h);		/* __FREE_CHECKED__ */
 }

@@ -41,6 +41,10 @@
 #include "imap_private.h"
 #endif
 
+#ifdef USE_MSQLITE
+#include "msqlite.h"
+#endif
+
 #include "mutt_crypt.h"
 
 
@@ -1093,7 +1097,17 @@ int mutt_index_menu (void)
 			break;
 		}
 
+		HEADER *oldcur = CURHDR;
+
 		msqlite_entire_thread(Context, CURHDR);
+
+		if ((Sort & SORT_MASK) == SORT_THREADS) {
+			mutt_sort_headers(Context, 0);
+		}
+
+		menu->current = oldcur->virtual;
+		menu->redraw = REDRAW_STATUS | REDRAW_INDEX;
+
 		break;
 	}
 #endif

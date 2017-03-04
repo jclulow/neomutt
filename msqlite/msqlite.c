@@ -3,6 +3,7 @@
 
 #include "config.h"
 #include "mutt.h"
+#include "mutt_curses.h"
 #include "mx.h"
 #include "url.h"
 #include "mailbox.h"
@@ -12,6 +13,7 @@
 #include "strings.h"
 #include "sort.h"
 
+
 #ifdef	USE_HCACHE
 #include "hcache.h"
 #endif
@@ -19,7 +21,6 @@
 #include "sqlite3.h"
 
 #include <sys/time.h>
-#include <sys/avl.h>
 #include <sys/debug.h>
 
 
@@ -34,48 +35,36 @@ typedef struct msqlite {
 	hrtime_t msql_last_check;
 	char *msql_last_update_stamp;
 
-	avl_tree_t msql_msgid_to_data;
+	unsigned msql_generation;
 } msqlite_t;
 
 typedef struct msqlite_data {
 	char *msqd_message_id;
 	char *msqd_history_id;
 	char *msqd_thread_id;
-	avl_node_t msqd_node;
+
+	unsigned msqd_generation;
 
 	HEADER *msqd_header;
 
 	int msqd_last_deleted;
 } msqlite_data_t;
 
-static int
-msqlite_data_comparator(const void *lp, const void *rp)
-{
-	const msqlite_data_t *lmsqd = lp;
-	const msqlite_data_t *rmsqd = rp;
-	int cmp;
-
-	cmp = strcmp(lmsqd->msqd_message_id, rmsqd->msqd_message_id);
-
-	return (cmp < 0 ? -1 : cmp > 0 ? 1 : 0);
-}
-
-#if 0
 static void
-msqlite_data_add(msqlite_t *msql, msqlite_data_t *msqd)
+msqlite_header_data_free(HEADER *h)
 {
-	avl_index_t where;
+	if (h == NULL)
+		return;
 
-	if (avl_find(&msql->msql_msgid_to_data, msqd) != NULL) {
-		mutt_error("duplicate message ID %s in avl tree?!",
-		    msqd->msqd_message_id);
-		mutt_sleep(2);
-		abort();
-	}
+	msqlite_data_t *msqd = h->data;
 
-	avl_insert(&kj
+	VERIFY3P(h, ==, msqd->msqd_header);
+
+	safe_free(&msqd->msqd_message_id);
+	safe_free(&msqd->msqd_history_id);
+	safe_free(&msqd->msqd_thread_id);
+	safe_free(&h->data);
 }
-#endif
 
 static int
 mx_parse_sqlite_path(const char *path, char **file, char **mbox)
@@ -269,17 +258,6 @@ msqlite_close_mailbox(CONTEXT *ctx)
 		return (-1);
 	}
 
-	msqlite_data_t *msqd;
-	void *cookie = NULL;
-	while ((msqd = avl_destroy_nodes(&msql->msql_msgid_to_data,
-	    &cookie)) != NULL) {
-		safe_free(&msqd->msqd_message_id);
-		safe_free(&msqd->msqd_history_id);
-		safe_free(&msqd->msqd_thread_id);
-		safe_free(&msqd);
-	}
-	avl_destroy(&msql->msql_msgid_to_data);
-
 	free(msql->msql_file);
 	free(msql->msql_mbox);
 	free(msql);
@@ -302,12 +280,6 @@ msqlite_open_mailbox(CONTEXT *ctx)
 		mutt_perror("msqlite_open_mailbox");
 		return (-1);
 	}
-
-	/*
-	 * XXX This should perhaps use the mutt-internal hash_create()?
-	 */
-	avl_create(&msql->msql_msgid_to_data, msqlite_data_comparator,
-	    sizeof (msqlite_data_t), offsetof(msqlite_data_t, msqd_node));
 
 	if (mx_parse_sqlite_path(ctx->path, &msql->msql_file,
 	    &msql->msql_mbox) != 0) {
@@ -674,7 +646,6 @@ fetch_from_db(msqlite_t *msql, const char *msg_id, FILE *fp)
 	return (0);
 }
 
-#if 1
 #define	QUERY_LABEL_MESSAGE_LIST \
 	"SELECT\n" \
 	"	m.id,\n" \
@@ -688,17 +659,19 @@ fetch_from_db(msqlite_t *msql, const char *msg_id, FILE *fp)
 	"	mtl.label_id = ?\n" \
 	"ORDER BY\n" \
 	"	m.id ASC\n"
-#else
-#define	QUERY_LABEL_MESSAGE_LIST \
+
+#define	QUERY_THREAD_MESSAGE_LIST \
 	"SELECT\n" \
-	"	mtl.message_id AS id\n" \
+	"	m.id,\n" \
+	"	m.history_id,\n" \
+	"	m.thread_id,\n" \
+	"	m.internal_date\n" \
 	"FROM\n" \
-	"	message_to_label mtl\n" \
+	"	message m\n" \
 	"WHERE\n" \
-	"	mtl.label_id = ?\n" \
+	"	m.thread_id = ?\n" \
 	"ORDER BY\n" \
-	"	mtl.message_id ASC\n"
-#endif
+	"	m.id ASC\n"
 
 #define	QUERY_MESSAGE_LIST \
 	"SELECT\n" \
@@ -711,6 +684,21 @@ fetch_from_db(msqlite_t *msql, const char *msg_id, FILE *fp)
 	"ORDER BY\n" \
 	"	m.id ASC\n"
 
+static HASH *
+hash_current_messages(CONTEXT *ctx)
+{
+	HASH *hash = hash_create(1031, 0);
+
+	for (int i = 0; i < ctx->msgcount; i++) {
+		HEADER *h = ctx->hdrs[i];
+		msqlite_data_t *msqd = h->data;
+
+		hash_insert(hash, msqd->msqd_message_id, h);
+	}
+
+	return (hash);
+}
+
 static int
 get_from_db(msqlite_t *msql, const char *label_id, const char *thread_id, int *new_mail)
 {
@@ -721,25 +709,39 @@ get_from_db(msqlite_t *msql, const char *label_id, const char *thread_id, int *n
 	int updated_flags = 0;
 	int updated_mail = 0;
 
-	*new_mail = 0;
+	if (new_mail != NULL) {
+		*new_mail = 0;
+	}
 
 	mutt_message(_("make message tempfile"));
 	if (make_message_tempfile(&fp) != 0) {
 		return (-1);
 	}
 
-	mutt_message(_("prepare"));
+	mutt_message(_("build active message hash"));
 
-	const char *q = (label_id == NULL) ? QUERY_MESSAGE_LIST :
-	    QUERY_LABEL_MESSAGE_LIST;
+	HASH *hash = hash_current_messages(ctx);
 
-	if (sqlite3_prepare_v2(msql->msql_db, q, strlen(q), &stmt,
-	    NULL) != SQLITE_OK) {
-		mutt_error("sqlite3_prepare fail");
+	mutt_message(_("prepare SQL"));
+
+	const char *q = QUERY_MESSAGE_LIST;
+	const char *p = NULL;
+	if (thread_id != NULL) {
+		q = QUERY_THREAD_MESSAGE_LIST;
+		p = thread_id;
+	} else if (label_id != NULL) {
+		q = QUERY_LABEL_MESSAGE_LIST;
+		p = label_id;
+	}
+
+	if (sqlite3_prepare_v2(msql->msql_db, q, -1, &stmt, NULL) !=
+	    SQLITE_OK) {
+		mutt_error("sqlite3_prepare fail: %s", sqlite3_errmsg(
+		    msql->msql_db));
 		mutt_sleep(1);
 		return (-1);
 	}
-	if (label_id != NULL && sqlite3_bind_text(stmt, 1, label_id, -1,
+	if (p != NULL && sqlite3_bind_text(stmt, 1, p, -1,
 	    SQLITE_STATIC) != SQLITE_OK) {
 		mutt_error("sqlite3_bind_text fail: %s", sqlite3_errmsg(
 		    msql->msql_db));
@@ -752,7 +754,6 @@ get_from_db(msqlite_t *msql, const char *label_id, const char *thread_id, int *n
 	int count = 0;
 	int oldmsgcount = ctx->msgcount;
 	while ((r = sqlite3_step(stmt)) == SQLITE_ROW) {
-		msqlite_data_t msqd_search;
 		msqlite_data_t *msqd = NULL;
 		const char *msg_id = (const char *)sqlite3_column_text(
 		    stmt, 0);
@@ -761,27 +762,23 @@ get_from_db(msqlite_t *msql, const char *label_id, const char *thread_id, int *n
 		const char *thr_id = (const char *)sqlite3_column_text(
 		    stmt, 2);
 		int64_t internal_date = sqlite3_column_int64(stmt, 3);
+		HEADER *h = NULL;
 
 		/*
 		 * First, check to see if we already have this message
 		 * loaded.
 		 */
-		msqd_search.msqd_message_id = (char *)msg_id;
-		if ((msqd = avl_find(&msql->msql_msgid_to_data,
-		    &msqd_search, NULL)) != NULL) {
-			if (msqd->msqd_header == NULL) {
-				/*
-				 * XXX DELETED...
-				 */
-				continue;
-			}
+		if ((h = hash_find(hash, msg_id)) != NULL) {
+			msqd = h->data;
+			msqd->msqd_generation = msql->msql_generation;
 
 			/*
 			 * This message existed already.  Just update the
 			 * flags.
 			 */
-			if (flags_from_db(msql, msg_id, msqd->msqd_header,
-			    &updated_flags) != 0) {
+			h->active = 1;
+			if (flags_from_db(msql, msg_id, h, &updated_flags) !=
+			    0) {
 				mutt_message("update flags failure (msg %s)",
 				    msg_id);
 				mutt_sleep(2);
@@ -795,66 +792,59 @@ get_from_db(msqlite_t *msql, const char *label_id, const char *thread_id, int *n
 		 */
 		errno = 0;
 		rewind(fp);
-		if (errno != 0) {
-			/*
-			 * XXX
-			 */
-			mutt_perror("rewind cache file");
-			mutt_sleep(2);
-			exit(10);
-		}
+		VERIFY3S(errno, ==, 0);
 		if (fetch_from_db(msql, msg_id, fp) != 0) {
 			continue;
 		}
+		errno = 0;
+		rewind(fp);
+		VERIFY3S(errno, ==, 0);
 
 		if (ctx->msgcount + 1 >= ctx->hdrmax) {
 			mx_alloc_memory(ctx);
 		}
 
-		ctx->msgcount++;
-		int idx = ctx->msgcount - 1;
-
+		int idx = ctx->msgcount;
 		if (idx % 1000 == 0 && idx > 0) {
 			mutt_message("getting message headers (%d)...", idx);
 		}
 
-		VERIFY3P(ctx->hdrs[idx], ==, NULL);
-		ctx->hdrs[idx] = mutt_new_header();
-
-		ctx->hdrs[idx]->index = idx;
+		h = mutt_new_header();
+		h->index = idx;
 
 		/*
 		 * Get "read" and "flagged" from the DB:
 		 */
-		if (flags_from_db(msql, msg_id, ctx->hdrs[idx], NULL) != 0) {
-			safe_free(&ctx->hdrs[idx]);
-			ctx->msgcount--;
+		if (flags_from_db(msql, msg_id, h, NULL) != 0) {
+			mutt_free_header(&h);
 			continue;
 		}
 
 		msqd = safe_calloc(1, sizeof (*msqd));
-		msqd->msqd_header = ctx->hdrs[idx];
+		msqd->msqd_header = h;
 		msqd->msqd_message_id = safe_strdup(msg_id);
 		msqd->msqd_history_id = safe_strdup(hist_id);
 		msqd->msqd_thread_id = safe_strdup(thr_id);
 		msqd->msqd_last_deleted = 0;
 
-		avl_add(&msql->msql_msgid_to_data, msqd);
+		h->active = 1;
+		h->old = 0;
+		h->deleted = 0;
+		h->replied = 0;
+		h->changed = 0;
+		h->received = internal_date / 1000;
 
-		ctx->hdrs[idx]->active = 1;
-		ctx->hdrs[idx]->old = 0;
-		ctx->hdrs[idx]->deleted = 0;
-		ctx->hdrs[idx]->replied = 0;
-		ctx->hdrs[idx]->changed = 0;
-		ctx->hdrs[idx]->received = internal_date / 1000;
-		ctx->hdrs[idx]->data = msqd;
+		h->data = msqd;
+		h->data_free = &msqlite_header_data_free;
 
-		rewind(fp);
-		ctx->hdrs[idx]->env = mutt_read_rfc822_header(fp,
-		    ctx->hdrs[idx], 0, 0);
+		h->env = mutt_read_rfc822_header(fp, h, 0, 0);
 
 		updated_mail = 1;
 		count++;
+
+		VERIFY3P(ctx->hdrs[idx], ==, NULL);
+		ctx->hdrs[idx] = h;
+		ctx->msgcount++;
 	}
 
 	if (r != SQLITE_DONE) {
@@ -873,48 +863,76 @@ get_from_db(msqlite_t *msql, const char *label_id, const char *thread_id, int *n
 
 	safe_fclose(&fp);
 
-	*new_mail = updated_mail ? MUTT_NEW_MAIL : updated_flags ? MUTT_FLAGS : 0;
+	hash_destroy(&hash, NULL);
+
+	if (new_mail != NULL) {
+		*new_mail = updated_mail ? MUTT_NEW_MAIL :
+		    updated_flags ? MUTT_FLAGS :
+		    0;
+	}
 
 	return (0);
 }
 
-#define	QUERY_THREAD_MESSAGE_LIST \
-	"SELECT\n" \
-	"	m.id,\n" \
-	"	m.history_id,\n" \
-	"	m.thread_id,\n" \
-	"	m.internal_date\n" \
-	"FROM\n" \
-	"	message m\n" \
-	"WHERE\n" \
-	"	m.thread_id = ?\n" \
-	"ORDER BY\n" \
-	"	m.id ASC\n"
-
 int
-msqlite_entire_thread(CONTEXT *ctx, HEADER *h)
+msqlite_entire_thread(CONTEXT *ctx, HEADER *ch)
 {
 	msqlite_t *msql = ctx->data;
 
-	if (h->data == NULL) {
+	if (ch->data == NULL) {
 		mutt_error("message does not have private data!");
 		return (-1);
 	}
 
-	msqlite_data_t *msqd = h->data;
+	msqlite_data_t *msqd = ch->data;
 	mutt_message("loading thread \"%s\"", msqd->msqd_thread_id);
 
+
+	/*
+	 * First, mark every message as inactive so that we can see which
+	 * messages come in as part of the specified thread.
+	 */
 	for (int i = 0; i < ctx->msgcount; i++) {
-		ctx->hdr[i]->active = 0;
+		ctx->hdrs[i]->active = 0;
 	}
 
+#if 0
 	mx_update_tables(ctx, 0);
 	mutt_clear_threads(ctx);
+#endif
 
 	get_from_db(msql, NULL, msqd->msqd_thread_id, NULL);
 
+	/*
+	 * XXX This cribs from mutt_pattern_func(MUTT_LIMIT)...
+	 */
+	ctx->vcount = 0;
+	ctx->vsize = 0;
+	ctx->collapsed = 0;
+	for (int i = 0; i < ctx->msgcount; i++) {
+		HEADER *h = ctx->hdrs[i];
+
+		if (!h->active) {
+			h->virtual = -1;
+			h->limited = 0;
+			h->collapsed = 0;
+			h->num_hidden = 0;
+		} else {
+			h->virtual = ctx->vcount;
+			h->limited = 1;
+			ctx->v2r[ctx->vcount++] = i;
+			/*
+			 * XXX ctx->vsize?
+			 */
+		}
+
+		h->active = 1;
+	}
+
+#if 0
 	mx_update_tables(ctx, 0);
 	mutt_clear_threads(ctx);
+#endif
 
 	return (0);
 }
@@ -984,7 +1002,7 @@ msqlite_check_mailbox(CONTEXT *ctx, int *index_hint)
 	}
 
 update:
-	get_from_db(msql, label_id, &new_mail);
+	get_from_db(msql, label_id, NULL, &new_mail);
 
 no_update:
 	safe_free(&label_id);
